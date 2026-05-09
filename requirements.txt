@@ -1,0 +1,10 @@
+runpod
+diffusers==0.30.0
+transformers==4.44.0
+accelerate==0.33.0
+sentencepiece
+protobuf
+huggingface_hub
+Pillow
+numpy
+safetensors
