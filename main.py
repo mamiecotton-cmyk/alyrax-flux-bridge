@@ -1,10 +1,8 @@
 import runpod
 import torch
 from diffusers import FluxPipeline
-from PIL import Image
 import base64
 import io
-import os
 import random
 
 MODEL_PATH = "/app/models/flux"
@@ -16,13 +14,13 @@ pipe = FluxPipeline.from_pretrained(
     local_files_only=True
 )
 pipe.enable_model_cpu_offload()
-print("Model loaded.")
+print("Flux model loaded.")
+
 
 def handler(job):
     job_input = job.get("input", {})
 
     prompt = job_input.get("prompt", "")
-    negative_prompt = job_input.get("negative_prompt", "")
     steps = job_input.get("num_inference_steps", 20)
     guidance = job_input.get("guidance_scale", 3.5)
     width = job_input.get("width", 512)
@@ -34,7 +32,8 @@ def handler(job):
 
     generator = torch.Generator("cpu").manual_seed(seed)
 
-    print(f"Generating image — {width}x{height}, steps={steps}, seed={seed}")
+    print(f"Generating — {width}x{height}, steps={steps}, seed={seed}")
+    print(f"Prompt: {prompt[:120]}")
 
     with torch.no_grad():
         image = pipe(
@@ -58,5 +57,6 @@ def handler(job):
         "width": width,
         "height": height,
     }
+
 
 runpod.serverless.start({"handler": handler})
