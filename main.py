@@ -1,8 +1,11 @@
 import base64
+import glob
 import io
+import json
 import os
 import random
 import shutil
+import threading
 
 MODEL_REPO = "camenduru/FLUX.1-dev-diffusers"
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
@@ -21,11 +24,35 @@ import torch
 from diffusers import FluxPipeline
 from huggingface_hub import snapshot_download
 
+txt_pipe = None
+pipe_lock = threading.Lock()
+
+
+def model_snapshot_is_complete():
+    if not os.path.exists(os.path.join(MODEL_PATH, "model_index.json")):
+        return False
+
+    for index_path in glob.glob(os.path.join(MODEL_PATH, "**", "*.index.json"), recursive=True):
+        with open(index_path, "r", encoding="utf-8") as index_file:
+            weight_map = json.load(index_file).get("weight_map", {})
+
+        index_dir = os.path.dirname(index_path)
+        for shard_name in set(weight_map.values()):
+            if not os.path.exists(os.path.join(index_dir, shard_name)):
+                print(f"Cached model is incomplete; missing {os.path.join(index_dir, shard_name)}.")
+                return False
+
+    return True
+
 
 def ensure_model_available():
-    if os.path.exists(os.path.join(MODEL_PATH, "model_index.json")):
+    if model_snapshot_is_complete():
         print(f"Using cached Flux model at {MODEL_PATH}.")
         return
+
+    if os.path.exists(MODEL_PATH):
+        print(f"Removing incomplete Flux model cache at {MODEL_PATH}.")
+        shutil.rmtree(MODEL_PATH)
 
     model_parent = os.path.dirname(MODEL_PATH)
     os.makedirs(model_parent, exist_ok=True)
@@ -46,16 +73,27 @@ def ensure_model_available():
     print("Flux model downloaded successfully.")
 
 
-ensure_model_available()
-print("Loading Flux model...")
-txt_pipe = FluxPipeline.from_pretrained(
-    MODEL_PATH,
-    torch_dtype=torch.bfloat16,
-    local_files_only=True
-)
-txt_pipe.enable_model_cpu_offload()
-# img2img pipeline removed — onboarding uses text-to-image only
-print("Flux model loaded.")
+def get_pipeline():
+    global txt_pipe
+
+    if txt_pipe is not None:
+        return txt_pipe
+
+    with pipe_lock:
+        if txt_pipe is not None:
+            return txt_pipe
+
+        ensure_model_available()
+        print("Loading Flux model...")
+        pipe = FluxPipeline.from_pretrained(
+            MODEL_PATH,
+            torch_dtype=torch.bfloat16,
+            local_files_only=True
+        )
+        pipe.enable_model_cpu_offload()
+        txt_pipe = pipe
+        print("Flux model loaded.")
+        return txt_pipe
 
 
 def handler(job):
@@ -80,15 +118,21 @@ def handler(job):
     if reference_image_url:
         print("reference_image_url was provided, but this worker currently runs text-to-image only.")
 
-    with torch.no_grad():
-        image = txt_pipe(
-            prompt=prompt,
-            num_inference_steps=steps,
-            guidance_scale=guidance,
-            width=width,
-            height=height,
-            generator=generator
-        ).images[0]
+    try:
+        pipe = get_pipeline()
+
+        with torch.no_grad():
+            image = pipe(
+                prompt=prompt,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                width=width,
+                height=height,
+                generator=generator
+            ).images[0]
+    except Exception as exc:
+        print(f"Image generation failed: {exc}")
+        return {"error": str(exc)}
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")

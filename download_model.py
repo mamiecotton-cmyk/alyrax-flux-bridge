@@ -1,3 +1,5 @@
+import glob
+import json
 import os
 import shutil
 
@@ -14,6 +16,31 @@ os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_PATH)
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from huggingface_hub import snapshot_download
+
+def model_snapshot_is_complete():
+    if not os.path.exists(os.path.join(MODEL_PATH, "model_index.json")):
+        return False
+
+    for index_path in glob.glob(os.path.join(MODEL_PATH, "**", "*.index.json"), recursive=True):
+        with open(index_path, "r", encoding="utf-8") as index_file:
+            weight_map = json.load(index_file).get("weight_map", {})
+
+        index_dir = os.path.dirname(index_path)
+        for shard_name in set(weight_map.values()):
+            if not os.path.exists(os.path.join(index_dir, shard_name)):
+                print(f"Cached model is incomplete; missing {os.path.join(index_dir, shard_name)}.")
+                return False
+
+    return True
+
+
+if model_snapshot_is_complete():
+    print(f"Using cached Flux model at {MODEL_PATH}.")
+    raise SystemExit(0)
+
+if os.path.exists(MODEL_PATH):
+    print(f"Removing incomplete Flux model cache at {MODEL_PATH}.")
+    shutil.rmtree(MODEL_PATH)
 
 model_parent = os.path.dirname(MODEL_PATH)
 os.makedirs(model_parent, exist_ok=True)
