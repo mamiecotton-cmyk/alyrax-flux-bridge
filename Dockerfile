@@ -3,9 +3,6 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
-ENV HF_HOME=/app/models
-ENV HUGGINGFACE_HUB_CACHE=/app/models
-ENV TRANSFORMERS_CACHE=/app/models
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
