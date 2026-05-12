@@ -10,16 +10,18 @@ import shutil
 import threading
 from PIL import Image, ImageOps
 
-MODEL_REPO = "camenduru/FLUX.1-dev-diffusers"
+MODEL_REPO = os.getenv("MODEL_REPO", "black-forest-labs/FLUX.2-klein-4B")
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
 MIN_MODEL_DISK_GB = 35
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
 MAX_SEQUENCE_LENGTH = int(os.getenv("MAX_SEQUENCE_LENGTH", "512"))
+DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "4"))
+MAX_INFERENCE_STEPS = int(os.getenv("MAX_INFERENCE_STEPS", "12"))
 MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "sequential").lower()
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "no"}
-PRELOAD_PIPELINE_KIND = os.getenv("PRELOAD_PIPELINE_KIND", "img2img").lower()
+MAX_REFERENCE_IMAGE_PIXELS = int(os.getenv("MAX_REFERENCE_IMAGE_PIXELS", str(1024 * 1024)))
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
-MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux"))
+MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux2-klein-4b"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
 
 os.environ.setdefault("HF_HOME", HF_CACHE_PATH)
@@ -29,11 +31,10 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import runpod
 import torch
-from diffusers import FluxImg2ImgPipeline, FluxPipeline
+from diffusers import Flux2KleinPipeline
 from huggingface_hub import snapshot_download
 
 active_pipe = None
-active_pipe_kind = None
 pipe_lock = threading.Lock()
 inference_lock = threading.Lock()
 
@@ -58,22 +59,25 @@ def clear_cuda_cache():
         pass
 
 
-def load_reference_image(image_url, width, height):
+def load_reference_image(image_url):
     response = requests.get(image_url, timeout=30)
     response.raise_for_status()
 
     image = Image.open(io.BytesIO(response.content)).convert("RGB")
-    image = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+    if image.width * image.height > MAX_REFERENCE_IMAGE_PIXELS:
+        scale = (MAX_REFERENCE_IMAGE_PIXELS / (image.width * image.height)) ** 0.5
+        size = (max(64, int(image.width * scale)), max(64, int(image.height * scale)))
+        image = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
     return image
 
 
-def clamp_reference_strength(value):
+def clamp_int(value, default, minimum, maximum):
     try:
-        strength = float(value)
+        number = int(value)
     except (TypeError, ValueError):
-        strength = 0.35
+        number = default
 
-    return max(0.05, min(0.95, strength))
+    return max(minimum, min(maximum, number))
 
 
 def model_snapshot_is_complete():
@@ -121,27 +125,19 @@ def ensure_model_available():
     print("Flux model downloaded successfully.")
 
 
-def get_pipeline(kind):
-    global active_pipe, active_pipe_kind
+def get_pipeline():
+    global active_pipe
 
-    if active_pipe is not None and active_pipe_kind == kind:
+    if active_pipe is not None:
         return active_pipe
 
     with pipe_lock:
-        if active_pipe is not None and active_pipe_kind == kind:
+        if active_pipe is not None:
             return active_pipe
 
-        if active_pipe is not None:
-            print(f"Unloading Flux {active_pipe_kind} pipeline before loading {kind}.")
-            del active_pipe
-            active_pipe = None
-            active_pipe_kind = None
-            clear_cuda_cache()
-
         ensure_model_available()
-        print(f"Loading Flux {kind} model...")
-        pipeline_cls = FluxImg2ImgPipeline if kind == "img2img" else FluxPipeline
-        pipe = pipeline_cls.from_pretrained(
+        print("Loading Flux2 Klein model...")
+        pipe = Flux2KleinPipeline.from_pretrained(
             MODEL_PATH,
             torch_dtype=torch.float16,
             local_files_only=True
@@ -157,8 +153,7 @@ def get_pipeline(kind):
             pipe.enable_sequential_cpu_offload()
 
         active_pipe = pipe
-        active_pipe_kind = kind
-        print(f"Flux {kind} model loaded with {MODEL_OFFLOAD_MODE} CPU offload.")
+        print(f"Flux2 Klein model loaded with {MODEL_OFFLOAD_MODE} CPU offload.")
         return active_pipe
 
 
@@ -166,7 +161,7 @@ def handler(job):
     job_input = job.get("input", {})
 
     prompt = job_input.get("prompt", "")
-    steps = job_input.get("num_inference_steps", 20)
+    steps = clamp_int(job_input.get("num_inference_steps", DEFAULT_INFERENCE_STEPS), DEFAULT_INFERENCE_STEPS, 1, MAX_INFERENCE_STEPS)
     guidance = job_input.get("guidance_scale", 3.5)
     width = job_input.get("width", 512)
     height = job_input.get("height", 768)
@@ -191,37 +186,26 @@ def handler(job):
     print(f"Prompt: {prompt[:120]}")
 
     try:
-        pipe_kind = "img2img" if reference_image_url else "text2img"
-        pipe = get_pipeline(pipe_kind)
+        pipe = get_pipeline()
 
         with inference_lock:
             clear_cuda_cache()
             with torch.inference_mode():
+                pipeline_args = {
+                    "prompt": prompt,
+                    "num_inference_steps": steps,
+                    "guidance_scale": guidance,
+                    "width": width,
+                    "height": height,
+                    "generator": generator,
+                    "max_sequence_length": MAX_SEQUENCE_LENGTH,
+                }
                 if reference_image_url:
-                    reference_image = load_reference_image(reference_image_url, width, height)
-                    strength = clamp_reference_strength(job_input.get("reference_strength", 0.35))
-                    print(f"Using anchored reference image with strength={strength}.")
-                    image = pipe(
-                        prompt=prompt,
-                        image=reference_image,
-                        strength=strength,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance,
-                        width=width,
-                        height=height,
-                        generator=generator,
-                        max_sequence_length=MAX_SEQUENCE_LENGTH
-                    ).images[0]
-                else:
-                    image = pipe(
-                        prompt=prompt,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance,
-                        width=width,
-                        height=height,
-                        generator=generator,
-                        max_sequence_length=MAX_SEQUENCE_LENGTH
-                    ).images[0]
+                    reference_image = load_reference_image(reference_image_url)
+                    print("Using anchored reference image for Flux2 image conditioning.")
+                    pipeline_args["image"] = reference_image
+
+                image = pipe(**pipeline_args).images[0]
     except Exception as exc:
         print(f"Image generation failed: {exc}")
         return {"error": str(exc)}
@@ -243,9 +227,8 @@ def handler(job):
 
 
 if PRELOAD_MODEL:
-    preload_kind = PRELOAD_PIPELINE_KIND if PRELOAD_PIPELINE_KIND in {"text2img", "img2img"} else "img2img"
-    print(f"Preloading Flux {preload_kind} model before accepting jobs...")
-    get_pipeline(preload_kind)
+    print("Preloading Flux2 Klein model before accepting jobs...")
+    get_pipeline()
     print("Worker is warm and ready for jobs.")
 
 runpod.serverless.start({"handler": handler})

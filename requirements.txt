@@ -1,7 +1,7 @@
 runpod
-diffusers==0.31.0
-transformers==4.44.0
-accelerate==0.33.0
+diffusers==0.38.0
+transformers==4.57.3
+accelerate==1.12.0
 sentencepiece
 protobuf
 huggingface_hub

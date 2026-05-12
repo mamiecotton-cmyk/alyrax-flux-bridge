@@ -3,11 +3,11 @@ import json
 import os
 import shutil
 
-MODEL_REPO = "camenduru/FLUX.1-dev-diffusers"
+MODEL_REPO = os.getenv("MODEL_REPO", "black-forest-labs/FLUX.2-klein-4B")
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
 MIN_MODEL_DISK_GB = 35
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
-MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux"))
+MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux2-klein-4b"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
 
 os.environ.setdefault("HF_HOME", HF_CACHE_PATH)
