@@ -1,20 +1,38 @@
 import runpod
 import torch
-from diffusers import FluxPipeline
+from diffusers import FluxImg2ImgPipeline, FluxPipeline
 import base64
 import io
 import random
+import requests
+from PIL import Image
 
 MODEL_PATH = "/app/models/flux"
 
 print("Loading Flux model...")
-pipe = FluxPipeline.from_pretrained(
+txt_pipe = FluxPipeline.from_pretrained(
     MODEL_PATH,
     torch_dtype=torch.bfloat16,
     local_files_only=True
 )
-pipe.enable_model_cpu_offload()
+txt_pipe.enable_model_cpu_offload()
+img_pipe = FluxImg2ImgPipeline.from_pretrained(
+    MODEL_PATH,
+    torch_dtype=torch.bfloat16,
+    local_files_only=True
+)
+img_pipe.enable_model_cpu_offload()
 print("Flux model loaded.")
+
+
+def load_reference_image(url, width, height):
+    if not url:
+        return None
+
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    return image.resize((width, height), Image.LANCZOS)
 
 
 def handler(job):
@@ -26,6 +44,8 @@ def handler(job):
     width = job_input.get("width", 512)
     height = job_input.get("height", 1024)
     seed = job_input.get("seed", -1)
+    reference_image_url = job_input.get("reference_image_url")
+    reference_strength = float(job_input.get("reference_strength", 0.72))
 
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
@@ -35,15 +55,28 @@ def handler(job):
     print(f"Generating — {width}x{height}, steps={steps}, seed={seed}")
     print(f"Prompt: {prompt[:120]}")
 
+    reference_image = load_reference_image(reference_image_url, width, height)
+
     with torch.no_grad():
-        image = pipe(
-            prompt=prompt,
-            num_inference_steps=steps,
-            guidance_scale=guidance,
-            width=width,
-            height=height,
-            generator=generator
-        ).images[0]
+        if reference_image is not None:
+            print(f"Using reference image strength={reference_strength}")
+            image = img_pipe(
+                prompt=prompt,
+                image=reference_image,
+                strength=reference_strength,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                generator=generator
+            ).images[0]
+        else:
+            image = txt_pipe(
+                prompt=prompt,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                width=width,
+                height=height,
+                generator=generator
+            ).images[0]
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
