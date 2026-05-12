@@ -45,7 +45,7 @@ def handler(job):
     height = job_input.get("height", 1024)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
-    reference_strength = float(job_input.get("reference_strength", 0.42))
+    reference_strength = float(job_input.get("reference_strength", 0.25))
 
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
