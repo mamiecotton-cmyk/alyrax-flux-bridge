@@ -1,6 +1,6 @@
 import runpod
 import torch
-from diffusers import FluxImg2ImgPipeline, FluxPipeline
+from diffusers import FluxPipeline
 import base64
 import io
 import random
@@ -16,12 +16,7 @@ txt_pipe = FluxPipeline.from_pretrained(
     local_files_only=True
 )
 txt_pipe.enable_model_cpu_offload()
-img_pipe = FluxImg2ImgPipeline.from_pretrained(
-    MODEL_PATH,
-    torch_dtype=torch.bfloat16,
-    local_files_only=True
-)
-img_pipe.enable_model_cpu_offload()
+# img2img pipeline removed — onboarding uses text-to-image only
 print("Flux model loaded.")
 
 
