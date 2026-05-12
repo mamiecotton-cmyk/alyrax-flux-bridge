@@ -17,6 +17,15 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from huggingface_hub import snapshot_download
 
+
+def shard_exists(index_dir, shard_name):
+    candidates = [
+        os.path.normpath(os.path.join(index_dir, shard_name)),
+        os.path.normpath(os.path.join(MODEL_PATH, shard_name)),
+    ]
+    return any(os.path.exists(candidate) for candidate in candidates)
+
+
 def model_snapshot_is_complete():
     if not os.path.exists(os.path.join(MODEL_PATH, "model_index.json")):
         return False
@@ -27,8 +36,8 @@ def model_snapshot_is_complete():
 
         index_dir = os.path.dirname(index_path)
         for shard_name in set(weight_map.values()):
-            if not os.path.exists(os.path.join(index_dir, shard_name)):
-                print(f"Cached model is incomplete; missing {os.path.join(index_dir, shard_name)}.")
+            if not shard_exists(index_dir, shard_name):
+                print(f"Cached model is incomplete; missing shard {shard_name} for {index_path}.")
                 return False
 
     return True

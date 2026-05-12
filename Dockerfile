@@ -3,6 +3,7 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
+ARG DOWNLOAD_MODEL=false
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
@@ -23,5 +24,6 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY download_model.py main.py .
+RUN if [ "$DOWNLOAD_MODEL" = "true" ]; then python download_model.py; fi
 
 CMD ["python", "-u", "main.py"]

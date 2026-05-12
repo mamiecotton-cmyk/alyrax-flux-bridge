@@ -1,4 +1,5 @@
 import base64
+import gc
 import glob
 import io
 import json
@@ -10,6 +11,9 @@ import threading
 MODEL_REPO = "camenduru/FLUX.1-dev-diffusers"
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
 MIN_MODEL_DISK_GB = 35
+MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
+MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "sequential").lower()
+PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "no"}
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
 MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
@@ -26,6 +30,27 @@ from huggingface_hub import snapshot_download
 
 txt_pipe = None
 pipe_lock = threading.Lock()
+inference_lock = threading.Lock()
+
+
+def shard_exists(index_dir, shard_name):
+    candidates = [
+        os.path.normpath(os.path.join(index_dir, shard_name)),
+        os.path.normpath(os.path.join(MODEL_PATH, shard_name)),
+    ]
+    return any(os.path.exists(candidate) for candidate in candidates)
+
+
+def clear_cuda_cache():
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+
+    torch.cuda.empty_cache()
+    try:
+        torch.cuda.ipc_collect()
+    except RuntimeError:
+        pass
 
 
 def model_snapshot_is_complete():
@@ -38,8 +63,8 @@ def model_snapshot_is_complete():
 
         index_dir = os.path.dirname(index_path)
         for shard_name in set(weight_map.values()):
-            if not os.path.exists(os.path.join(index_dir, shard_name)):
-                print(f"Cached model is incomplete; missing {os.path.join(index_dir, shard_name)}.")
+            if not shard_exists(index_dir, shard_name):
+                print(f"Cached model is incomplete; missing shard {shard_name} for {index_path}.")
                 return False
 
     return True
@@ -87,12 +112,21 @@ def get_pipeline():
         print("Loading Flux model...")
         pipe = FluxPipeline.from_pretrained(
             MODEL_PATH,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,
             local_files_only=True
         )
-        pipe.enable_model_cpu_offload()
+        pipe.enable_attention_slicing()
+        if getattr(pipe, "vae", None) is not None:
+            pipe.vae.enable_slicing()
+            pipe.vae.enable_tiling()
+
+        if MODEL_OFFLOAD_MODE == "model":
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.enable_sequential_cpu_offload()
+
         txt_pipe = pipe
-        print("Flux model loaded.")
+        print(f"Flux model loaded with {MODEL_OFFLOAD_MODE} CPU offload.")
         return txt_pipe
 
 
@@ -103,14 +137,23 @@ def handler(job):
     steps = job_input.get("num_inference_steps", 20)
     guidance = job_input.get("guidance_scale", 3.5)
     width = job_input.get("width", 512)
-    height = job_input.get("height", 1024)
+    height = job_input.get("height", 768)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
 
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
 
-    generator = torch.Generator("cpu").manual_seed(seed)
+    if width * height > MAX_IMAGE_PIXELS:
+        return {
+            "error": (
+                f"Requested image is too large: {width}x{height}. "
+                f"Max pixels is {MAX_IMAGE_PIXELS}; lower width/height or raise MAX_IMAGE_PIXELS."
+            )
+        }
+
+    generator_device = "cuda" if torch.cuda.is_available() else "cpu"
+    generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     print(f"Generating — {width}x{height}, steps={steps}, seed={seed}")
     print(f"Prompt: {prompt[:120]}")
@@ -121,18 +164,22 @@ def handler(job):
     try:
         pipe = get_pipeline()
 
-        with torch.no_grad():
-            image = pipe(
-                prompt=prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                width=width,
-                height=height,
-                generator=generator
-            ).images[0]
+        with inference_lock:
+            clear_cuda_cache()
+            with torch.inference_mode():
+                image = pipe(
+                    prompt=prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    width=width,
+                    height=height,
+                    generator=generator
+                ).images[0]
     except Exception as exc:
         print(f"Image generation failed: {exc}")
         return {"error": str(exc)}
+    finally:
+        clear_cuda_cache()
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -147,5 +194,10 @@ def handler(job):
         "height": height,
     }
 
+
+if PRELOAD_MODEL:
+    print("Preloading Flux model before accepting jobs...")
+    get_pipeline()
+    print("Worker is warm and ready for jobs.")
 
 runpod.serverless.start({"handler": handler})
