@@ -1,14 +1,33 @@
 import runpod
 import torch
 from diffusers import FluxPipeline
+from huggingface_hub import snapshot_download
 import base64
 import io
+import os
 import random
-import requests
-from PIL import Image
 
-MODEL_PATH = "/app/models/flux"
+MODEL_REPO = "camenduru/FLUX.1-dev-diffusers"
+MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
+DEFAULT_MODEL_PATH = "/runpod-volume/models/flux" if os.path.isdir("/runpod-volume") else "/app/models/flux"
+MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 
+
+def ensure_model_available():
+    if os.path.exists(os.path.join(MODEL_PATH, "model_index.json")):
+        print(f"Using cached Flux model at {MODEL_PATH}.")
+        return
+
+    print(f"Downloading Flux model to {MODEL_PATH}...")
+    snapshot_download(
+        repo_id=MODEL_REPO,
+        local_dir=MODEL_PATH,
+        ignore_patterns=MODEL_IGNORE_PATTERNS,
+    )
+    print("Flux model downloaded successfully.")
+
+
+ensure_model_available()
 print("Loading Flux model...")
 txt_pipe = FluxPipeline.from_pretrained(
     MODEL_PATH,
@@ -18,16 +37,6 @@ txt_pipe = FluxPipeline.from_pretrained(
 txt_pipe.enable_model_cpu_offload()
 # img2img pipeline removed — onboarding uses text-to-image only
 print("Flux model loaded.")
-
-
-def load_reference_image(url, width, height):
-    if not url:
-        return None
-
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    image = Image.open(io.BytesIO(response.content)).convert("RGB")
-    return image.resize((width, height), Image.LANCZOS)
 
 
 def handler(job):
@@ -40,7 +49,6 @@ def handler(job):
     height = job_input.get("height", 1024)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
-    reference_strength = float(job_input.get("reference_strength", 0.25))
 
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
@@ -50,28 +58,18 @@ def handler(job):
     print(f"Generating — {width}x{height}, steps={steps}, seed={seed}")
     print(f"Prompt: {prompt[:120]}")
 
-    reference_image = load_reference_image(reference_image_url, width, height)
+    if reference_image_url:
+        print("reference_image_url was provided, but this worker currently runs text-to-image only.")
 
     with torch.no_grad():
-        if reference_image is not None:
-            print(f"Using reference image strength={reference_strength}")
-            image = img_pipe(
-                prompt=prompt,
-                image=reference_image,
-                strength=reference_strength,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                generator=generator
-            ).images[0]
-        else:
-            image = txt_pipe(
-                prompt=prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                width=width,
-                height=height,
-                generator=generator
-            ).images[0]
+        image = txt_pipe(
+            prompt=prompt,
+            num_inference_steps=steps,
+            guidance_scale=guidance,
+            width=width,
+            height=height,
+            generator=generator
+        ).images[0]
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
