@@ -12,7 +12,6 @@ MODEL_REPO = "camenduru/FLUX.1-dev-diffusers"
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
 MIN_MODEL_DISK_GB = 35
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
-DIMENSION_MULTIPLE = 64
 MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "sequential").lower()
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "no"}
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
@@ -33,19 +32,6 @@ txt_pipe = None
 pipe_lock = threading.Lock()
 inference_lock = threading.Lock()
 
-SIZE_PRESETS = {
-    "portrait": (768, 1024),
-    "profile": (768, 1024),
-    "headshot": (768, 1024),
-    "full_body": (832, 1216),
-    "full-body": (832, 1216),
-    "fullbody": (832, 1216),
-    "full_screen": (1024, 1024),
-    "full-screen": (1024, 1024),
-    "fullscreen": (1024, 1024),
-    "square": (1024, 1024),
-}
-
 
 def shard_exists(index_dir, shard_name):
     candidates = [
@@ -65,49 +51,6 @@ def clear_cuda_cache():
         torch.cuda.ipc_collect()
     except RuntimeError:
         pass
-
-
-def round_down_to_multiple(value, multiple=DIMENSION_MULTIPLE):
-    return max(multiple, int(value) // multiple * multiple)
-
-
-def normalize_dimensions(job_input):
-    size_preset = str(
-        job_input.get("size")
-        or job_input.get("image_size")
-        or job_input.get("imageSize")
-        or job_input.get("preset")
-        or ""
-    ).lower()
-
-    if size_preset in SIZE_PRESETS:
-        width, height = SIZE_PRESETS[size_preset]
-        print(f"Using image size preset '{size_preset}' -> {width}x{height}.")
-    else:
-        width = int(job_input.get("width", 512))
-        height = int(job_input.get("height", 768))
-
-    width = round_down_to_multiple(width)
-    height = round_down_to_multiple(height)
-
-    if width * height <= MAX_IMAGE_PIXELS:
-        return width, height
-
-    scale = (MAX_IMAGE_PIXELS / (width * height)) ** 0.5
-    safe_width = round_down_to_multiple(width * scale)
-    safe_height = round_down_to_multiple(height * scale)
-
-    while safe_width * safe_height > MAX_IMAGE_PIXELS:
-        if safe_width >= safe_height:
-            safe_width -= DIMENSION_MULTIPLE
-        else:
-            safe_height -= DIMENSION_MULTIPLE
-
-    print(
-        f"Requested image size {width}x{height} exceeds max pixels {MAX_IMAGE_PIXELS}; "
-        f"using {safe_width}x{safe_height} instead."
-    )
-    return safe_width, safe_height
 
 
 def model_snapshot_is_complete():
@@ -193,12 +136,21 @@ def handler(job):
     prompt = job_input.get("prompt", "")
     steps = job_input.get("num_inference_steps", 20)
     guidance = job_input.get("guidance_scale", 3.5)
-    width, height = normalize_dimensions(job_input)
+    width = job_input.get("width", 512)
+    height = job_input.get("height", 768)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
 
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
+
+    if width * height > MAX_IMAGE_PIXELS:
+        return {
+            "error": (
+                f"Requested image is too large: {width}x{height}. "
+                f"Max pixels is {MAX_IMAGE_PIXELS}; lower width/height or raise MAX_IMAGE_PIXELS."
+            )
+        }
 
     generator_device = "cuda" if torch.cuda.is_available() else "cpu"
     generator = torch.Generator(device=generator_device).manual_seed(seed)
