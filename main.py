@@ -12,11 +12,12 @@ from PIL import Image, ImageOps
 
 MODEL_REPO = os.getenv("MODEL_REPO", "black-forest-labs/FLUX.2-klein-4B")
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
-MIN_MODEL_DISK_GB = 35
+MIN_MODEL_DISK_GB = int(os.getenv("MIN_MODEL_DISK_GB", "60"))
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
 MAX_SEQUENCE_LENGTH = int(os.getenv("MAX_SEQUENCE_LENGTH", "512"))
 DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "4"))
 MAX_INFERENCE_STEPS = int(os.getenv("MAX_INFERENCE_STEPS", "12"))
+SNAPSHOT_DOWNLOAD_WORKERS = int(os.getenv("SNAPSHOT_DOWNLOAD_WORKERS", "1"))
 MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "sequential").lower()
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "no"}
 MAX_REFERENCE_IMAGE_PIXELS = int(os.getenv("MAX_REFERENCE_IMAGE_PIXELS", str(1024 * 1024)))
@@ -121,6 +122,7 @@ def ensure_model_available():
         repo_id=MODEL_REPO,
         local_dir=MODEL_PATH,
         ignore_patterns=MODEL_IGNORE_PATTERNS,
+        max_workers=SNAPSHOT_DOWNLOAD_WORKERS,
     )
     print("Flux model downloaded successfully.")
 

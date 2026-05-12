@@ -5,7 +5,8 @@ import shutil
 
 MODEL_REPO = os.getenv("MODEL_REPO", "black-forest-labs/FLUX.2-klein-4B")
 MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
-MIN_MODEL_DISK_GB = 35
+MIN_MODEL_DISK_GB = int(os.getenv("MIN_MODEL_DISK_GB", "60"))
+SNAPSHOT_DOWNLOAD_WORKERS = int(os.getenv("SNAPSHOT_DOWNLOAD_WORKERS", "1"))
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
 MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux2-klein-4b"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
@@ -67,6 +68,7 @@ snapshot_download(
     repo_id=MODEL_REPO,
     local_dir=MODEL_PATH,
     ignore_patterns=MODEL_IGNORE_PATTERNS,
+    max_workers=SNAPSHOT_DOWNLOAD_WORKERS,
 )
 
 print("Flux model downloaded successfully.")
