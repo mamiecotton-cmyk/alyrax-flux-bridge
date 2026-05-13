@@ -16,8 +16,8 @@ RUN python -m pip install --upgrade pip
 
 WORKDIR /app
 
-# Install PyTorch with CUDA 12.1
-RUN pip install torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cu121
+# FLUX.2 Klein needs torch.nn.RMSNorm, which is not available in torch 2.3.
+RUN pip install torch==2.6.0 torchvision==0.21.0
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt
