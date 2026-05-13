@@ -1,29 +1,32 @@
 import base64
 import gc
-import glob
 import io
-import json
 import os
 import random
 import requests
-import shutil
 import threading
 from PIL import Image, ImageOps
 
-MODEL_REPO = os.getenv("MODEL_REPO", "black-forest-labs/FLUX.2-klein-4B")
-MODEL_IGNORE_PATTERNS = ["*.git*", "*.md"]
-MIN_MODEL_DISK_GB = int(os.getenv("MIN_MODEL_DISK_GB", "60"))
+MODEL_REPO = os.getenv("MODEL_REPO", "AstraliteHeart/pony-diffusion-v6")
+MODEL_FILENAME = os.getenv("MODEL_FILENAME", "v6.safetensors")
+MIN_MODEL_DISK_GB = int(os.getenv("MIN_MODEL_DISK_GB", "15"))
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
-MAX_SEQUENCE_LENGTH = int(os.getenv("MAX_SEQUENCE_LENGTH", "512"))
-DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "8"))
-MAX_INFERENCE_STEPS = int(os.getenv("MAX_INFERENCE_STEPS", "12"))
-SNAPSHOT_DOWNLOAD_WORKERS = int(os.getenv("SNAPSHOT_DOWNLOAD_WORKERS", "1"))
-MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "sequential").lower()
+DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "28"))
+MAX_INFERENCE_STEPS = int(os.getenv("MAX_INFERENCE_STEPS", "40"))
+MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "none").lower()
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "no"}
 MAX_REFERENCE_IMAGE_PIXELS = int(os.getenv("MAX_REFERENCE_IMAGE_PIXELS", str(1024 * 1024)))
+REFERENCE_DENOISE_BASE = float(os.getenv("REFERENCE_DENOISE_BASE", "0.75"))
+DEFAULT_REFERENCE_DENOISE = float(os.getenv("DEFAULT_REFERENCE_DENOISE", "0.55"))
+PONY_PROMPT_PREFIX = os.getenv("PONY_PROMPT_PREFIX", "score_9, score_8_up, score_7_up, score_6_up")
+PONY_NEGATIVE_PREFIX = os.getenv(
+    "PONY_NEGATIVE_PREFIX",
+    "score_6, score_5, score_4, worst quality, low quality, blurry, bad anatomy, extra limbs, missing limbs"
+)
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
-MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "flux2-klein-4b"))
+MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "pony-diffusion-v6"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
+MODEL_FILE_PATH = os.path.join(MODEL_PATH, MODEL_FILENAME)
 
 os.environ.setdefault("HF_HOME", HF_CACHE_PATH)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_CACHE_PATH)
@@ -32,20 +35,16 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import runpod
 import torch
-from diffusers import Flux2KleinPipeline
-from huggingface_hub import snapshot_download
+from diffusers import (
+    EulerAncestralDiscreteScheduler,
+    StableDiffusionXLImg2ImgPipeline,
+    StableDiffusionXLPipeline,
+)
+from huggingface_hub import hf_hub_download
 
-active_pipe = None
+active_pipes = None
 pipe_lock = threading.Lock()
 inference_lock = threading.Lock()
-
-
-def shard_exists(index_dir, shard_name):
-    candidates = [
-        os.path.normpath(os.path.join(index_dir, shard_name)),
-        os.path.normpath(os.path.join(MODEL_PATH, shard_name)),
-    ]
-    return any(os.path.exists(candidate) for candidate in candidates)
 
 
 def clear_cuda_cache():
@@ -60,7 +59,7 @@ def clear_cuda_cache():
         pass
 
 
-def load_reference_image(image_url):
+def load_reference_image(image_url, width=None, height=None):
     response = requests.get(image_url, timeout=30)
     response.raise_for_status()
 
@@ -69,6 +68,16 @@ def load_reference_image(image_url):
         scale = (MAX_REFERENCE_IMAGE_PIXELS / (image.width * image.height)) ** 0.5
         size = (max(64, int(image.width * scale)), max(64, int(image.height * scale)))
         image = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
+
+    if width and height:
+        image = ImageOps.pad(
+            image,
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+            color=(255, 255, 255),
+            centering=(0.5, 0.5),
+        )
+
     return image
 
 
@@ -81,94 +90,132 @@ def clamp_int(value, default, minimum, maximum):
     return max(minimum, min(maximum, number))
 
 
-def model_snapshot_is_complete():
-    if not os.path.exists(os.path.join(MODEL_PATH, "model_index.json")):
-        return False
+def clamp_float(value, default, minimum, maximum):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
 
-    for index_path in glob.glob(os.path.join(MODEL_PATH, "**", "*.index.json"), recursive=True):
-        with open(index_path, "r", encoding="utf-8") as index_file:
-            weight_map = json.load(index_file).get("weight_map", {})
+    return max(minimum, min(maximum, number))
 
-        index_dir = os.path.dirname(index_path)
-        for shard_name in set(weight_map.values()):
-            if not shard_exists(index_dir, shard_name):
-                print(f"Cached model is incomplete; missing shard {shard_name} for {index_path}.")
-                return False
 
-    return True
+def model_file_is_complete():
+    return os.path.exists(MODEL_FILE_PATH) and os.path.getsize(MODEL_FILE_PATH) > 1024 * 1024 * 1024
 
 
 def ensure_model_available():
-    if model_snapshot_is_complete():
-        print(f"Using cached Flux model at {MODEL_PATH}.")
+    if model_file_is_complete():
+        print(f"Using cached Pony model at {MODEL_FILE_PATH}.")
         return
 
-    if os.path.exists(MODEL_PATH):
-        print(f"Removing incomplete Flux model cache at {MODEL_PATH}.")
-        shutil.rmtree(MODEL_PATH)
-
-    model_parent = os.path.dirname(MODEL_PATH)
-    os.makedirs(model_parent, exist_ok=True)
-    free_gb = shutil.disk_usage(model_parent).free / (1024**3)
+    os.makedirs(MODEL_PATH, exist_ok=True)
+    free_gb = os.statvfs(MODEL_PATH).f_bavail * os.statvfs(MODEL_PATH).f_frsize / (1024**3)
     if free_gb < MIN_MODEL_DISK_GB:
         raise RuntimeError(
             f"Not enough disk space for {MODEL_REPO}. "
-            f"Need at least {MIN_MODEL_DISK_GB} GB free at {model_parent}, found {free_gb:.1f} GB. "
-            "Attach a RunPod network volume and set MODEL_PATH=/runpod-volume/models/flux."
+            f"Need at least {MIN_MODEL_DISK_GB} GB free at {MODEL_PATH}, found {free_gb:.1f} GB. "
+            "Attach a RunPod network volume and set MODEL_PATH=/runpod-volume/models/pony-diffusion-v6."
         )
 
-    print(f"Downloading Flux model to {MODEL_PATH}...")
-    snapshot_download(
+    print(f"Downloading Pony model {MODEL_REPO}/{MODEL_FILENAME} to {MODEL_PATH}...")
+    hf_hub_download(
         repo_id=MODEL_REPO,
+        filename=MODEL_FILENAME,
         local_dir=MODEL_PATH,
-        ignore_patterns=MODEL_IGNORE_PATTERNS,
-        max_workers=SNAPSHOT_DOWNLOAD_WORKERS,
+        local_dir_use_symlinks=False,
     )
-    print("Flux model downloaded successfully.")
+    print("Pony model downloaded successfully.")
 
 
-def get_pipeline():
-    global active_pipe
+def apply_memory_settings(pipe):
+    pipe.enable_attention_slicing()
+    if getattr(pipe, "vae", None) is not None:
+        pipe.vae.enable_slicing()
+        pipe.vae.enable_tiling()
 
-    if active_pipe is not None:
-        return active_pipe
+
+def place_pipeline(pipe):
+    if not torch.cuda.is_available():
+        return
+
+    if MODEL_OFFLOAD_MODE == "model":
+        pipe.enable_model_cpu_offload()
+    elif MODEL_OFFLOAD_MODE == "sequential":
+        pipe.enable_sequential_cpu_offload()
+    else:
+        pipe.to("cuda")
+
+
+def normalize_prompt(prompt):
+    prompt = prompt.strip()
+    if not PONY_PROMPT_PREFIX:
+        return prompt
+    if prompt.lower().startswith(PONY_PROMPT_PREFIX.lower()):
+        return prompt
+    return f"{PONY_PROMPT_PREFIX}, {prompt}" if prompt else PONY_PROMPT_PREFIX
+
+
+def normalize_negative_prompt(negative_prompt):
+    negative_prompt = negative_prompt.strip()
+    if not PONY_NEGATIVE_PREFIX:
+        return negative_prompt
+    if negative_prompt.lower().startswith(PONY_NEGATIVE_PREFIX.lower()):
+        return negative_prompt
+    return f"{PONY_NEGATIVE_PREFIX}, {negative_prompt}" if negative_prompt else PONY_NEGATIVE_PREFIX
+
+
+def get_pipelines():
+    global active_pipes
+
+    if active_pipes is not None:
+        return active_pipes
 
     with pipe_lock:
-        if active_pipe is not None:
-            return active_pipe
+        if active_pipes is not None:
+            return active_pipes
 
         ensure_model_available()
-        print("Loading Flux2 Klein model...")
-        pipe = Flux2KleinPipeline.from_pretrained(
-            MODEL_PATH,
+        print("Loading Pony Diffusion V6 SDXL model...")
+        text_pipe = StableDiffusionXLPipeline.from_single_file(
+            MODEL_FILE_PATH,
             torch_dtype=torch.float16,
-            local_files_only=True
+            use_safetensors=True,
         )
-        pipe.enable_attention_slicing()
-        if getattr(pipe, "vae", None) is not None:
-            pipe.vae.enable_slicing()
-            pipe.vae.enable_tiling()
+        text_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(text_pipe.scheduler.config)
+        image_pipe = StableDiffusionXLImg2ImgPipeline(**text_pipe.components)
+        image_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(image_pipe.scheduler.config)
 
-        if MODEL_OFFLOAD_MODE == "model":
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.enable_sequential_cpu_offload()
+        apply_memory_settings(text_pipe)
+        apply_memory_settings(image_pipe)
+        place_pipeline(text_pipe)
+        place_pipeline(image_pipe)
 
-        active_pipe = pipe
-        print(f"Flux2 Klein model loaded with {MODEL_OFFLOAD_MODE} CPU offload.")
-        return active_pipe
+        active_pipes = {
+            "text": text_pipe,
+            "image": image_pipe,
+        }
+        print(f"Pony Diffusion V6 model loaded with {MODEL_OFFLOAD_MODE} offload mode.")
+        return active_pipes
 
 
 def handler(job):
     job_input = job.get("input", {})
 
-    prompt = job_input.get("prompt", "")
+    prompt = normalize_prompt(job_input.get("prompt", ""))
+    negative_prompt = normalize_negative_prompt(job_input.get("negative_prompt", ""))
     steps = clamp_int(job_input.get("num_inference_steps", DEFAULT_INFERENCE_STEPS), DEFAULT_INFERENCE_STEPS, 1, MAX_INFERENCE_STEPS)
-    guidance = float(job_input.get("guidance_scale", 1.0))
+    guidance = clamp_float(job_input.get("guidance_scale", 7.0), 7.0, 1.0, 12.0)
     width = job_input.get("width", 512)
     height = job_input.get("height", 768)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
+    reference_strength = clamp_float(job_input.get("reference_strength", 0.25), 0.25, 0.0, 1.0)
+    denoise_strength = clamp_float(
+        job_input.get("denoise_strength", REFERENCE_DENOISE_BASE - reference_strength),
+        DEFAULT_REFERENCE_DENOISE,
+        0.30,
+        0.80,
+    )
 
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
@@ -184,30 +231,32 @@ def handler(job):
     generator_device = "cuda" if torch.cuda.is_available() else "cpu"
     generator = torch.Generator(device=generator_device).manual_seed(seed)
 
-    print(f"Generating — {width}x{height}, steps={steps}, seed={seed}")
+    print(f"Generating — {width}x{height}, steps={steps}, cfg={guidance}, seed={seed}")
     print(f"Prompt: {prompt[:120]}")
 
     try:
-        pipe = get_pipeline()
+        pipes = get_pipelines()
 
         with inference_lock:
             clear_cuda_cache()
             with torch.inference_mode():
                 pipeline_args = {
                     "prompt": prompt,
+                    "negative_prompt": negative_prompt,
                     "num_inference_steps": steps,
                     "guidance_scale": guidance,
                     "width": width,
                     "height": height,
                     "generator": generator,
-                    "max_sequence_length": MAX_SEQUENCE_LENGTH,
                 }
                 if reference_image_url:
-                    reference_image = load_reference_image(reference_image_url)
-                    print("Using anchored reference image for Flux2 image conditioning.")
+                    reference_image = load_reference_image(reference_image_url, width, height)
+                    print(f"Using anchored reference image for Pony img2img, denoise_strength={denoise_strength}.")
                     pipeline_args["image"] = reference_image
-
-                image = pipe(**pipeline_args).images[0]
+                    pipeline_args["strength"] = denoise_strength
+                    image = pipes["image"](**pipeline_args).images[0]
+                else:
+                    image = pipes["text"](**pipeline_args).images[0]
     except Exception as exc:
         print(f"Image generation failed: {exc}")
         return {"error": str(exc)}
@@ -229,8 +278,8 @@ def handler(job):
 
 
 if PRELOAD_MODEL:
-    print("Preloading Flux2 Klein model before accepting jobs...")
-    get_pipeline()
+    print("Preloading Pony Diffusion V6 model before accepting jobs...")
+    get_pipelines()
     print("Worker is warm and ready for jobs.")
 
 runpod.serverless.start({"handler": handler})
