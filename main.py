@@ -209,7 +209,7 @@ def handler(job):
     height = job_input.get("height", 768)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
-    reference_strength = clamp_float(job_input.get("reference_strength", 0.25), 0.25, 0.0, 1.0)
+    reference_strength = clamp_float(job_input.get("reference_strength", 0.35), 0.35, 0.0, 1.0)
     denoise_strength = clamp_float(
         job_input.get("denoise_strength", REFERENCE_DENOISE_BASE - reference_strength),
         DEFAULT_REFERENCE_DENOISE,
