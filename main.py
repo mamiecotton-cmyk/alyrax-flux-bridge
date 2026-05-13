@@ -7,8 +7,8 @@ import requests
 import threading
 from PIL import Image, ImageOps
 
-MODEL_REPO = os.getenv("MODEL_REPO", "AstraliteHeart/pony-diffusion-v6")
-MODEL_FILENAME = os.getenv("MODEL_FILENAME", "v6.safetensors")
+MODEL_REPO = os.getenv("MODEL_REPO", "cyberdelia/CyberRealisticPony")
+MODEL_FILENAME = os.getenv("MODEL_FILENAME", "CyberRealisticPony_V17.0_FP16.safetensors")
 MIN_MODEL_DISK_GB = int(os.getenv("MIN_MODEL_DISK_GB", "15"))
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
 DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "28"))
@@ -24,7 +24,7 @@ PONY_NEGATIVE_PREFIX = os.getenv(
     "score_6, score_5, score_4, worst quality, low quality, blurry, bad anatomy, extra limbs, missing limbs"
 )
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
-MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "pony-diffusion-v6"))
+MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "cyberrealistic-pony"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
 MODEL_FILE_PATH = os.path.join(MODEL_PATH, MODEL_FILENAME)
 
@@ -105,7 +105,7 @@ def model_file_is_complete():
 
 def ensure_model_available():
     if model_file_is_complete():
-        print(f"Using cached Pony model at {MODEL_FILE_PATH}.")
+        print(f"Using cached CyberRealistic Pony model at {MODEL_FILE_PATH}.")
         return
 
     os.makedirs(MODEL_PATH, exist_ok=True)
@@ -114,17 +114,17 @@ def ensure_model_available():
         raise RuntimeError(
             f"Not enough disk space for {MODEL_REPO}. "
             f"Need at least {MIN_MODEL_DISK_GB} GB free at {MODEL_PATH}, found {free_gb:.1f} GB. "
-            "Attach a RunPod network volume and set MODEL_PATH=/runpod-volume/models/pony-diffusion-v6."
+            "Attach a RunPod network volume and set MODEL_PATH=/runpod-volume/models/cyberrealistic-pony."
         )
 
-    print(f"Downloading Pony model {MODEL_REPO}/{MODEL_FILENAME} to {MODEL_PATH}...")
+    print(f"Downloading CyberRealistic Pony model {MODEL_REPO}/{MODEL_FILENAME} to {MODEL_PATH}...")
     hf_hub_download(
         repo_id=MODEL_REPO,
         filename=MODEL_FILENAME,
         local_dir=MODEL_PATH,
         local_dir_use_symlinks=False,
     )
-    print("Pony model downloaded successfully.")
+    print("CyberRealistic Pony model downloaded successfully.")
 
 
 def apply_memory_settings(pipe):
@@ -175,7 +175,7 @@ def get_pipelines():
             return active_pipes
 
         ensure_model_available()
-        print("Loading Pony Diffusion V6 SDXL model...")
+        print("Loading CyberRealistic Pony SDXL model...")
         text_pipe = StableDiffusionXLPipeline.from_single_file(
             MODEL_FILE_PATH,
             torch_dtype=torch.float16,
@@ -194,7 +194,7 @@ def get_pipelines():
             "text": text_pipe,
             "image": image_pipe,
         }
-        print(f"Pony Diffusion V6 model loaded with {MODEL_OFFLOAD_MODE} offload mode.")
+        print(f"CyberRealistic Pony model loaded with {MODEL_OFFLOAD_MODE} offload mode.")
         return active_pipes
 
 
@@ -209,7 +209,7 @@ def handler(job):
     height = job_input.get("height", 768)
     seed = job_input.get("seed", -1)
     reference_image_url = job_input.get("reference_image_url")
-    reference_strength = clamp_float(job_input.get("reference_strength", 0.35), 0.35, 0.0, 1.0)
+    reference_strength = clamp_float(job_input.get("reference_strength", 0.23), 0.23, 0.0, 1.0)
     denoise_strength = clamp_float(
         job_input.get("denoise_strength", REFERENCE_DENOISE_BASE - reference_strength),
         DEFAULT_REFERENCE_DENOISE,
@@ -232,7 +232,7 @@ def handler(job):
     generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     print(f"Generating — {width}x{height}, steps={steps}, cfg={guidance}, seed={seed}")
-    print(f"Prompt: {prompt[:120]}")
+    print(f"Prompt length={len(prompt)}: {prompt[:180]}")
 
     try:
         pipes = get_pipelines()
@@ -251,7 +251,11 @@ def handler(job):
                 }
                 if reference_image_url:
                     reference_image = load_reference_image(reference_image_url, width, height)
-                    print(f"Using anchored reference image for Pony img2img, denoise_strength={denoise_strength}.")
+                    print(
+                        "Using anchored reference image for CyberRealistic Pony img2img: "
+                        f"url={reference_image_url[:180]}, size={reference_image.width}x{reference_image.height}, "
+                        f"denoise_strength={denoise_strength}."
+                    )
                     pipeline_args["image"] = reference_image
                     pipeline_args["strength"] = denoise_strength
                     image = pipes["image"](**pipeline_args).images[0]
@@ -278,7 +282,7 @@ def handler(job):
 
 
 if PRELOAD_MODEL:
-    print("Preloading Pony Diffusion V6 model before accepting jobs...")
+    print("Preloading CyberRealistic Pony model before accepting jobs...")
     get_pipelines()
     print("Worker is warm and ready for jobs.")
 
