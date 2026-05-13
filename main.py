@@ -18,7 +18,6 @@ MAX_SEQUENCE_LENGTH = int(os.getenv("MAX_SEQUENCE_LENGTH", "512"))
 DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "8"))
 MAX_INFERENCE_STEPS = int(os.getenv("MAX_INFERENCE_STEPS", "12"))
 SNAPSHOT_DOWNLOAD_WORKERS = int(os.getenv("SNAPSHOT_DOWNLOAD_WORKERS", "1"))
-CAPTION_UPSAMPLE_TEMPERATURE = float(os.getenv("CAPTION_UPSAMPLE_TEMPERATURE", "0.15"))
 MODEL_OFFLOAD_MODE = os.getenv("MODEL_OFFLOAD_MODE", "sequential").lower()
 PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "no"}
 MAX_REFERENCE_IMAGE_PIXELS = int(os.getenv("MAX_REFERENCE_IMAGE_PIXELS", str(1024 * 1024)))
@@ -202,7 +201,6 @@ def handler(job):
                     "height": height,
                     "generator": generator,
                     "max_sequence_length": MAX_SEQUENCE_LENGTH,
-                    "caption_upsample_temperature": CAPTION_UPSAMPLE_TEMPERATURE,
                 }
                 if reference_image_url:
                     reference_image = load_reference_image(reference_image_url)
