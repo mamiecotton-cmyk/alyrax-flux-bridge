@@ -61,10 +61,18 @@ def clear_cuda_cache():
 
 
 def load_reference_image(image_url, width=None, height=None):
-    response = requests.get(image_url, timeout=30)
-    response.raise_for_status()
+    if image_url.startswith("data:image"):
+        try:
+            _, encoded_image = image_url.split(",", 1)
+        except ValueError as exc:
+            raise ValueError("Invalid data URL reference image") from exc
+        image_bytes = base64.b64decode(encoded_image)
+    else:
+        response = requests.get(image_url, timeout=30)
+        response.raise_for_status()
+        image_bytes = response.content
 
-    image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     if image.width * image.height > MAX_REFERENCE_IMAGE_PIXELS:
         scale = (MAX_REFERENCE_IMAGE_PIXELS / (image.width * image.height)) ** 0.5
         size = (max(64, int(image.width * scale)), max(64, int(image.height * scale)))
