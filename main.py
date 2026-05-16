@@ -7,8 +7,9 @@ import requests
 import threading
 from PIL import Image, ImageOps
 
-MODEL_REPO = os.getenv("MODEL_REPO", "cyberdelia/CyberRealisticPony")
-MODEL_FILENAME = os.getenv("MODEL_FILENAME", "CyberRealisticPony_V17.0_FP16.safetensors")
+MODEL_REPO = os.getenv("MODEL_REPO", "Stableyogi/Realism-Pony-Checkpoints")
+MODEL_FILENAME = os.getenv("MODEL_FILENAME", "realismByStableYogi_ponyV3VAE.safetensors")
+MODEL_DISPLAY_NAME = os.getenv("MODEL_DISPLAY_NAME", "Realism Pony")
 MIN_MODEL_DISK_GB = int(os.getenv("MIN_MODEL_DISK_GB", "15"))
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(1024 * 1024)))
 DEFAULT_INFERENCE_STEPS = int(os.getenv("DEFAULT_INFERENCE_STEPS", "28"))
@@ -18,13 +19,13 @@ PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "1").lower() not in {"0", "false", "n
 MAX_REFERENCE_IMAGE_PIXELS = int(os.getenv("MAX_REFERENCE_IMAGE_PIXELS", str(1024 * 1024)))
 REFERENCE_DENOISE_BASE = float(os.getenv("REFERENCE_DENOISE_BASE", "0.75"))
 DEFAULT_REFERENCE_DENOISE = float(os.getenv("DEFAULT_REFERENCE_DENOISE", "0.55"))
-PONY_PROMPT_PREFIX = os.getenv("PONY_PROMPT_PREFIX", "score_9, score_8_up, score_7_up, score_6_up")
+PONY_PROMPT_PREFIX = os.getenv("PONY_PROMPT_PREFIX", "score_9, score_8_up, photo, realistic")
 PONY_NEGATIVE_PREFIX = os.getenv(
     "PONY_NEGATIVE_PREFIX",
-    "score_6, score_5, score_4, worst quality, low quality, blurry, bad anatomy, extra limbs, missing limbs"
+    "score_6, score_5, score_4, worst quality, low quality, blurry, bad anatomy, extra limbs, missing limbs, pixar, disney, cartoon, anime, 3d character, doll face, plastic skin, game render"
 )
 DEFAULT_MODEL_ROOT = "/runpod-volume/models" if os.path.isdir("/runpod-volume") else "/app/models"
-MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "cyberrealistic-pony"))
+MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(DEFAULT_MODEL_ROOT, "realism-pony"))
 HF_CACHE_PATH = os.getenv("HF_HOME", os.path.join(os.path.dirname(MODEL_PATH), ".hf-cache"))
 MODEL_FILE_PATH = os.path.join(MODEL_PATH, MODEL_FILENAME)
 
@@ -105,7 +106,7 @@ def model_file_is_complete():
 
 def ensure_model_available():
     if model_file_is_complete():
-        print(f"Using cached CyberRealistic Pony model at {MODEL_FILE_PATH}.")
+        print(f"Using cached {MODEL_DISPLAY_NAME} model at {MODEL_FILE_PATH}.")
         return
 
     os.makedirs(MODEL_PATH, exist_ok=True)
@@ -114,17 +115,17 @@ def ensure_model_available():
         raise RuntimeError(
             f"Not enough disk space for {MODEL_REPO}. "
             f"Need at least {MIN_MODEL_DISK_GB} GB free at {MODEL_PATH}, found {free_gb:.1f} GB. "
-            "Attach a RunPod network volume and set MODEL_PATH=/runpod-volume/models/cyberrealistic-pony."
+            "Attach a RunPod network volume and set MODEL_PATH=/runpod-volume/models/realism-pony."
         )
 
-    print(f"Downloading CyberRealistic Pony model {MODEL_REPO}/{MODEL_FILENAME} to {MODEL_PATH}...")
+    print(f"Downloading {MODEL_DISPLAY_NAME} model {MODEL_REPO}/{MODEL_FILENAME} to {MODEL_PATH}...")
     hf_hub_download(
         repo_id=MODEL_REPO,
         filename=MODEL_FILENAME,
         local_dir=MODEL_PATH,
         local_dir_use_symlinks=False,
     )
-    print("CyberRealistic Pony model downloaded successfully.")
+    print(f"{MODEL_DISPLAY_NAME} model downloaded successfully.")
 
 
 def apply_memory_settings(pipe):
@@ -175,7 +176,7 @@ def get_pipelines():
             return active_pipes
 
         ensure_model_available()
-        print("Loading CyberRealistic Pony SDXL model...")
+        print(f"Loading {MODEL_DISPLAY_NAME} SDXL model...")
         text_pipe = StableDiffusionXLPipeline.from_single_file(
             MODEL_FILE_PATH,
             torch_dtype=torch.float16,
@@ -194,7 +195,7 @@ def get_pipelines():
             "text": text_pipe,
             "image": image_pipe,
         }
-        print(f"CyberRealistic Pony model loaded with {MODEL_OFFLOAD_MODE} offload mode.")
+        print(f"{MODEL_DISPLAY_NAME} model loaded with {MODEL_OFFLOAD_MODE} offload mode.")
         return active_pipes
 
 
@@ -252,7 +253,7 @@ def handler(job):
                 if reference_image_url:
                     reference_image = load_reference_image(reference_image_url, width, height)
                     print(
-                        "Using anchored reference image for CyberRealistic Pony img2img: "
+                        f"Using anchored reference image for {MODEL_DISPLAY_NAME} img2img: "
                         f"url={reference_image_url[:180]}, size={reference_image.width}x{reference_image.height}, "
                         f"denoise_strength={denoise_strength}."
                     )
@@ -282,7 +283,7 @@ def handler(job):
 
 
 if PRELOAD_MODEL:
-    print("Preloading CyberRealistic Pony model before accepting jobs...")
+    print(f"Preloading {MODEL_DISPLAY_NAME} model before accepting jobs...")
     get_pipelines()
     print("Worker is warm and ready for jobs.")
 
